@@ -1,0 +1,7 @@
+node_modules/
+dist/
+
+# Régénéré par scripts/prepare.mjs (npm install) : three.js + cannon-es
+vendor/
+
+# NB : engine/ est VERSIONNÉ (le moteur du jeu embarqué).

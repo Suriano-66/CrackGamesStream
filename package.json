@@ -1,0 +1,32 @@
+{
+  "name": "crackgames-stream",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Application Streamer CrackGamesLive — fenêtre source portrait (OBS/TikTok) + panneau de contrôle premium",
+  "author": "CrackGamesLive",
+  "main": "main.js",
+  "scripts": {
+    "assets": "node scripts/prepare.mjs",
+    "postinstall": "node scripts/prepare.mjs",
+    "start": "npm run assets && electron .",
+    "dist:win": "npm run assets && electron-builder --win --x64"
+  },
+  "dependencies": {
+    "tiktok-live-connector": "^2.0.6"
+  },
+  "devDependencies": {
+    "three": "0.171.0",
+    "cannon-es": "0.20.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "live.crackgames.stream",
+    "productName": "CrackGames Stream",
+    "asar": false,
+    "files": ["main.js", "preload-*.js", "control/**/*", "source/**/*", "engine/**/*", "vendor/**/*", "!**/*.map"],
+    "directories": { "output": "dist" },
+    "win": { "target": ["nsis"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  }
+}

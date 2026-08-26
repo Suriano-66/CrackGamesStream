@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>CrackGames — Source</title>
+<link rel="stylesheet" href="./source.css" />
+<script type="importmap">
+{"imports":{
+  "three":"../vendor/three/build/three.module.js",
+  "cannon-es":"../vendor/cannon-es/dist/cannon-es.js"
+}}
+</script>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hud">
+    <div class="top">
+      <div class="title">🏁 La grande course</div>
+      <div id="status" class="status">En attente…</div>
+    </div>
+
+    <div class="board">
+      <div class="board-h">🏆 Classement</div>
+      <div id="rows"></div>
+      <div id="empty" class="empty">En attente de participants…</div>
+    </div>
+
+    <div class="bottom">
+      <div class="cta">🎁 Offre un cadeau pour lâcher tes billes !</div>
+      <div id="conn" class="conn off">● Mode démo</div>
+    </div>
+
+    <div id="winner" class="winner" hidden>
+      <div class="winner-card">
+        <div class="wh">🏆 Vainqueur</div>
+        <div id="wav" class="wav"></div>
+        <div id="wn" class="wn"></div>
+        <div class="ws">Nouvelle course imminente…</div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./source.js"></script>
+</body>
+</html>
