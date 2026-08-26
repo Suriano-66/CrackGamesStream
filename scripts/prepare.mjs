@@ -11,6 +11,8 @@ const COPIES = [
   ["three/build/three.module.js", "vendor/three/build/three.module.js"],
   ["three/build/three.core.js", "vendor/three/build/three.core.js"],
   ["cannon-es/dist/cannon-es.js", "vendor/cannon-es/dist/cannon-es.js"],
+  ["three/examples/jsm/loaders/GLTFLoader.js", "vendor/three/examples/jsm/loaders/GLTFLoader.js"],
+  ["three/examples/jsm/utils/BufferGeometryUtils.js", "vendor/three/examples/jsm/utils/BufferGeometryUtils.js"],
 ];
 
 let ok = 0;

@@ -24,9 +24,27 @@
     "appId": "live.crackgames.stream",
     "productName": "CrackGames Stream",
     "asar": false,
-    "files": ["main.js", "preload-*.js", "control/**/*", "source/**/*", "engine/**/*", "vendor/**/*", "!**/*.map"],
-    "directories": { "output": "dist" },
-    "win": { "target": ["nsis"] },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "files": [
+      "main.js",
+      "preload-*.js",
+      "control/**/*",
+      "source/**/*",
+      "engine/**/*",
+      "vendor/**/*",
+      "assets/**/*",
+      "!**/*.map"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }
