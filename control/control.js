@@ -13,7 +13,33 @@ const state = {
   demoOn: false,
   gift: { byGift: {}, default: 1, maxPerPlayer: 100 },
   seen: {},
+  gameType: "marble-race",
 };
+
+// Jeux disponibles (doit rester aligné avec engine/games.js).
+const GAME_LABELS = { "marble-race": "🏁 Course", "team-war": "⚔️ Bagarre Rouge vs Bleu" };
+const GAME_CAMS = {
+  "marble-race": [["auto", "Auto"], ["chase", "Derrière"], ["front", "De face"], ["side", "Côté"], ["top", "Vue du haut"], ["free", "🎮 Libre"]],
+  "team-war": [["auto", "Auto"], ["side", "Côté"], ["close", "Mêlée"], ["front", "Dans l'axe"], ["high", "Vue haute"], ["top", "Dessus"], ["free", "🎮 Libre"]],
+};
+function gameLabel(id) {
+  return GAME_LABELS[id] || GAME_LABELS["marble-race"];
+}
+// Reconstruit les boutons caméra selon le jeu chargé.
+function renderCamButtons() {
+  const grid = document.querySelector(".cam-grid");
+  if (!grid) return;
+  const cams = GAME_CAMS[state.gameType] || GAME_CAMS["marble-race"];
+  grid.innerHTML = "";
+  for (const [v, label] of cams) {
+    const b = document.createElement("button");
+    b.className = "cam" + (v === state.camMode ? " active" : "");
+    b.dataset.cam = v;
+    b.textContent = label;
+    b.addEventListener("click", () => setCam(v));
+    grid.appendChild(b);
+  }
+}
 
 let toastT = null;
 function toast(msg, kind) {
@@ -180,7 +206,7 @@ async function loadLevels() {
     state.byId[l.id] = l;
     const o = document.createElement("option");
     o.value = l.id;
-    o.textContent = l.name + (l.active ? " ● (live)" : "");
+    o.textContent = gameLabel(l.gameType) + " — " + l.name + (l.active ? " ● (live)" : "");
     sel.appendChild(o);
     if (l.active && !activeId) activeId = l.id;
   }
@@ -203,9 +229,17 @@ function sendLevel(id) {
   const l = state.byId[id];
   if (!l) return;
   const { platforms, settings } = parseData(l.data);
-  toSource({ type: "cmd", cmd: "level", level: { platforms, settings } });
+  const gt = l.gameType || "marble-race";
+  const changed = gt !== state.gameType;
+  state.gameType = gt;
+  toSource({ type: "cmd", cmd: "level", gameType: gt, level: { platforms, settings } });
   pushGift(); // ré-applique la config cadeaux au moteur (re)chargé
-  toast("Circuit chargé : " + l.name, "ok");
+  if (changed) {
+    state.camMode = "auto";
+    renderCamButtons();
+    setCam("auto");
+  }
+  toast(gameLabel(gt) + " — " + l.name, "ok");
 }
 
 // ---------- caméra ----------
@@ -261,9 +295,31 @@ function onSource(msg) {
   if (msg.type === "state") {
     renderBoard(msg.board || []);
     const info = msg.info || {};
-    $("#phasePill").textContent =
-      info.phase === "racing" ? "● Course en cours" : info.phase === "intermission" ? "Résultats…" : "En attente";
-    $("#playersInfo").textContent = (info.players || 0) + " joueur" + ((info.players || 0) > 1 ? "s" : "");
+    const enCours = info.phase === "racing" || info.phase === "battle" || info.phase === "countdown";
+    $("#phasePill").textContent = enCours
+      ? "● Manche en cours"
+      : info.phase === "intermission"
+        ? "Résultats…"
+        : "En attente de joueurs";
+    // File d'attente : combien de joueurs ont offert pour la PROCHAINE manche.
+    let attente;
+    if (state.gameType === "team-war") {
+      const need = info.needPerTeam ?? 3;
+      attente = `🔴 ${info.rouge?.queued ?? 0}/${need} · ${info.bleu?.queued ?? 0}/${need} 🔵 en attente`;
+    } else {
+      attente = `${info.queued ?? 0}/${info.need ?? 4} joueurs en attente`;
+    }
+    $("#playersInfo").textContent = attente;
+    // Le bouton Démarrer n'a de sens que hors manche et avec assez de monde.
+    const btn = $("#raceStart");
+    if (btn) {
+      btn.disabled = enCours || !info.canStart;
+      btn.title = enCours
+        ? "Une manche est déjà en cours"
+        : info.canStart
+          ? "Lancer la manche maintenant"
+          : "Pas encore assez de joueurs";
+    }
   } else if (msg.type === "pick") {
     // récupère le nom via le board courant si dispo
     const el = document.querySelector(`.brow[data-id="${CSS.escape(msg.playerId)}"]`);
@@ -311,7 +367,7 @@ function wire() {
   $("#raceStart").addEventListener("click", () => toSource({ type: "cmd", cmd: "start" }));
   $("#raceStop").addEventListener("click", () => toSource({ type: "cmd", cmd: "stop" }));
   $("#autoRace").addEventListener("change", (e) => toSource({ type: "cmd", cmd: "autorace", value: e.target.checked }));
-  $$(".cam").forEach((b) => b.addEventListener("click", () => setCam(b.dataset.cam)));
+  renderCamButtons();
   $("#mapLoad").addEventListener("click", () => sendLevel($("#mapSel").value));
   $("#giftOpen").addEventListener("click", openGift);
   $("#giftClose").addEventListener("click", () => ($("#giftModal").hidden = true));

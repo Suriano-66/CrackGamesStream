@@ -1,0 +1,18 @@
+# Fins de ligne normalisées en LF dans le dépôt.
+# Sans ce fichier, un poste en CRLF fait apparaître CHAQUE fichier comme
+# entièrement modifié : les fusions deviennent ingérables et « git pull »
+# refuse de s'exécuter. À committer une seule fois, avec un
+# « git add --renormalize . » fait par une seule personne.
+* text=auto eol=lf
+
+# Fichiers binaires : jamais de conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.db binary
+*.glb binary
+*.mp4 binary

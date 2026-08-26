@@ -15,7 +15,21 @@ const MAX_BALLS = 100;
 const RACE_MAX_MS = 90000;
 const INTERMISSION_MS = 8000;
 const CAM_SWITCH_MS = 7000;
-const MIN_PLAYERS = 2; // il faut au moins 2 joueurs différents pour lancer une course
+
+// ----- Rig de caméra -----
+// Amortissement indépendant du nombre d'images par seconde, cible paresseuse
+// (zone morte + plafond de vitesse) et coupe franche au changement de plan.
+// Sans ça la caméra sursautait à chaque bille qui apparaissait, parce que le
+// point suivi était le barycentre de TOUTES les billes.
+const CAM_AIM_TAU = 0.8;
+const CAM_LOOK_TAU = 0.45;
+const CAM_POS_TAU = 0.65;
+const CAM_DEADZONE = 1.4;
+const CAM_AIM_MAX_SPEED = 26; // les billes vont vite : plafond plus haut
+const CAM_MIN_SHOT_MS = 6500;
+const LEAD_HYSTERESIS = 2.5; // avance requise pour changer de bille suivie
+const MIN_PLAYERS = 4; // joueurs requis pour un départ automatique
+const MIN_FORCE_PLAYERS = 2; // minimum pour un départ manuel depuis le panneau
 const COUNTDOWN_MS = 3000; // 3·2·1 avant le GO (billes retenues au départ)
 const D2R = Math.PI / 180;
 
@@ -156,6 +170,11 @@ export function createMarbleRace3D(canvas, opts = {}) {
     connected: false,
     camLook: new THREE.Vector3(0, 0, 0),
     camDir: new THREE.Vector3(0, 0, 1),
+    camAim: new THREE.Vector3(0, 0, 0),  // cible lissée (zone morte + plafond)
+    camCut: true,                        // vrai = coupe franche
+    camLastMode: "",
+    camHold: new THREE.Vector3(0, 0, 0), // dernier point connu
+    leadId: null,                        // bille suivie, avec hystérésis
     // Contrôles temps réel
     camOverride: null, // null = suit `cameraPref` ; sinon force un mode
     focusPlayerId: null,
@@ -419,7 +438,7 @@ export function createMarbleRace3D(canvas, opts = {}) {
     let p = S.players.get(id);
     if (!p) {
       const hue = Math.round((S.players.size * 137.508 + (hashHue(id) % 40)) % 360);
-      p = { id, name: name || "Viewer", color: `hsl(${hue}, 85%, 60%)`, ballCount: 0, full: false, finishRank: null, img: null };
+      p = { id, name: name || "Viewer", color: `hsl(${hue}, 85%, 60%)`, ballCount: 0, pending: 0, full: false, finishRank: null, img: null };
       if (avatar) {
         const img = new Image();
         img.crossOrigin = "anonymous";
@@ -432,16 +451,42 @@ export function createMarbleRace3D(canvas, opts = {}) {
   }
   function handleGift(userId, nickname, avatar, giftName, count) {
     const p = ensurePlayer(userId, nickname, avatar);
+    // Fusion : la config de cadeaux par compte (côté collègue) s'applique
+    // désormais à la file d'attente et non plus à la course en cours.
     const cap = Math.min(MAX_BALLS, S.giftConfig.maxPerPlayer || MAX_BALLS);
-    if (p.ballCount >= cap) {
+    if (p.pending >= cap) {
       p.full = true;
       return;
     }
-    const before = p.ballCount;
-    p.ballCount = Math.min(cap, p.ballCount + marblesForGift(giftName, count, S.giftConfig));
-    if (p.ballCount >= cap) p.full = true;
-    const gained = p.ballCount - before;
-    if (S.phase !== "intermission" && gained > 0) queueSpawns(p, gained);
+    // Le cadeau alimente la course SUIVANTE, jamais celle en cours : une fois
+    // le départ donné, plus aucune bille n'apparaît.
+    p.pending = Math.min(cap, p.pending + marblesForGift(giftName, count, S.giftConfig));
+    if (p.pending >= cap) p.full = true;
+  }
+  // Joueurs ayant des billes en attente pour la prochaine course.
+  function queuedPlayers() {
+    let n = 0;
+    for (const p of S.players.values()) if (p.pending > 0) n++;
+    return n;
+  }
+  // Retire les joueurs de la course écoulée : pour la suivante, il faut avoir
+  // renvoyé un cadeau.
+  function purgePlayers() {
+    for (const [id, p] of [...S.players]) {
+      if (p.pending > 0) {
+        p.ballCount = 0;
+        p.finishRank = null;
+        p.full = false;
+        continue;
+      }
+      S.players.delete(id);
+      const a = avatarCache.get(id);
+      if (a) {
+        scene.remove(a.sprite);
+        a.tex.dispose();
+        avatarCache.delete(id);
+      }
+    }
   }
 
   function removeAllMarbles() {
@@ -463,11 +508,22 @@ export function createMarbleRace3D(canvas, opts = {}) {
     S.camDir.set(S.startDir.x, 0, S.startDir.z);
     if (S.camDir.lengthSq() < 0.001) S.camDir.set(0, 0, 1);
     S.camDir.normalize();
-    for (const p of S.players.values()) queueSpawns(p, p.ballCount);
-    // Assez de joueurs → compte à rebours (billes gelées) ; sinon on attend.
-    const enough = S.players.size >= MIN_PLAYERS;
+    // On engage les billes accumulées et on remet la file à zéro : pour courir
+    // la manche suivante, il faudra renvoyer un cadeau.
+    let engaged = 0;
+    for (const p of S.players.values()) {
+      p.ballCount = p.pending;
+      p.pending = 0;
+      p.full = false;
+      if (p.ballCount > 0) {
+        queueSpawns(p, p.ballCount);
+        engaged++;
+      }
+    }
+    const enough = engaged >= MIN_FORCE_PLAYERS;
     S.frozen = enough;
     S.phase = enough ? "countdown" : "filling";
+    S.camCut = true;
     S.phaseStart = now;
     S.countdownStart = now;
     S.raceStart = now; // recalé au GO
@@ -497,29 +553,8 @@ export function createMarbleRace3D(canvas, opts = {}) {
   // ----- Caméra -----
   const _v = new THREE.Vector3();
   const _c = new THREE.Vector3();
-  function packInfo() {
-    let n = 0;
-    _c.set(0, 0, 0);
-    _v.set(0, 0, 0);
-    let lead = null,
-      leadProg = -Infinity;
-    for (const m of S.marbles) {
-      if (m.finished) continue;
-      _c.add(m.body.position);
-      _v.x += m.body.velocity.x;
-      _v.y += m.body.velocity.y;
-      _v.z += m.body.velocity.z;
-      n++;
-      const prog = progressOf(m.body.position);
-      if (prog > leadProg) {
-        leadProg = prog;
-        lead = m;
-      }
-    }
-    if (!n) return null;
-    _c.multiplyScalar(1 / n);
-    return { c: _c.clone(), v: _v.clone(), lead, n };
-  }
+  // (packInfo/barycentre supprimé : c'était lui qui faisait sauter la caméra à
+  // chaque bille qui apparaissait ou disparaissait. On suit la bille de tête.)
   const AUTO_SEQ = ["chase", "front", "side", "chase", "top"];
   const _side = new THREE.Vector3();
   const _tan = new THREE.Vector3();
@@ -563,81 +598,142 @@ export function createMarbleRace3D(canvas, opts = {}) {
     return fm;
   }
 
+  // Amortissement indépendant du framerate (exp(-dt/tau)) : à tau constant le
+  // rendu est le même à 30 ou à 144 images/seconde.
+  function damp(cur, target, tau, dt) {
+    cur.lerp(target, 1 - Math.exp(-dt / Math.max(0.001, tau)));
+    return cur;
+  }
+  const _aimTmp = new THREE.Vector3();
+  // Cible paresseuse : en dessous de la zone morte on ne bouge pas, et la cible
+  // ne peut pas se déplacer plus vite que CAM_AIM_MAX_SPEED — donc aucun coup
+  // de fouet quand la bille suivie change ou qu'une bille disparaît.
+  function updateAim(raw, dt) {
+    _aimTmp.copy(raw).sub(S.camAim);
+    const d = _aimTmp.length();
+    if (d < CAM_DEADZONE) return S.camAim;
+    _aimTmp.multiplyScalar((d - CAM_DEADZONE) / d);
+    _aimTmp.multiplyScalar(1 - Math.exp(-dt / CAM_AIM_TAU));
+    const maxStep = CAM_AIM_MAX_SPEED * dt;
+    if (_aimTmp.length() > maxStep) _aimTmp.setLength(maxStep);
+    S.camAim.add(_aimTmp);
+    return S.camAim;
+  }
+  // Bille suivie : on ne change de leader que s'il prend une avance nette, sinon
+  // la caméra oscillait entre deux billes au coude à coude.
+  function stableLead() {
+    let cur = null;
+    let best = null;
+    let bestProg = -Infinity;
+    for (const m of S.marbles) {
+      if (m.finished) continue;
+      const prog = progressOf(m.body.position);
+      if (m.playerId === S.leadId && !cur) cur = { m, prog };
+      if (prog > bestProg) {
+        bestProg = prog;
+        best = { m, prog };
+      }
+    }
+    if (!best) return null;
+    if (cur && bestProg < cur.prog + LEAD_HYSTERESIS) return cur.m;
+    S.leadId = best.m.playerId;
+    return best.m;
+  }
+
   function updateCamera(now) {
-    const baseMode = S.camOverride || cameraPref;
-    if (baseMode === "free") {
+    const dt = S.frameDt;
+    let mode = S.camOverride || cameraPref || "auto";
+    if (mode === "free") {
       updateFree();
+      S.camLastMode = mode;
       return;
     }
-    let camPos = new THREE.Vector3(0, 70, -40);
-    let look = new THREE.Vector3(0, 40, 6);
-    const info = packInfo();
-    if (info && (S.phase === "racing" || S.phase === "intermission" || S.phase === "countdown")) {
-      let focusM = info.lead || null;
-      let center = info.c;
-      if (baseMode === "focus" && S.focusPlayerId) {
-        const fm = leadMarbleOf(S.focusPlayerId);
-        if (fm) {
-          focusM = fm;
-          center = new THREE.Vector3(fm.body.position.x, fm.body.position.y, fm.body.position.z);
-        }
+    if (mode === "auto") {
+      if (S.phase === "racing" && now - S.camModeStart > CAM_MIN_SHOT_MS) {
+        S.camMode = (S.camMode + 1) % AUTO_SEQ.length;
+        S.camModeStart = now;
+        S.camCut = true;
       }
-      // direction = vitesse horizontale de la bille suivie (lissée → pas de secousse)
-      _tan.set(
-        focusM ? focusM.body.velocity.x : info.v.x,
-        0,
-        focusM ? focusM.body.velocity.z : info.v.z,
-      );
-      if (_tan.lengthSq() < 0.6) _tan.copy(S.camDir);
-      _tan.normalize();
-      S.camDir.lerp(_tan, 0.045);
-      S.camDir.y = 0;
-      if (S.camDir.lengthSq() < 0.001) S.camDir.set(0, 0, 1);
-      S.camDir.normalize();
-      const d = S.camDir;
-      _side.set(d.z, 0, -d.x).normalize();
-      const c = center;
-
-      let mode = baseMode;
-      if (mode === "auto") {
-        if (S.phase === "racing" && now - S.camModeStart > CAM_SWITCH_MS) {
-          S.camMode = (S.camMode + 1) % AUTO_SEQ.length;
-          S.camModeStart = now;
-        }
-        mode = AUTO_SEQ[S.camMode % AUTO_SEQ.length];
-      } else if (mode === "focus") {
-        mode = "chase";
-      }
-
-      if (mode === "front") {
-        camPos.copy(c).addScaledVector(d, 17).addScaledVector(_side, 5);
-        camPos.y = c.y + 9;
-        look.copy(c).addScaledVector(d, -2);
-        look.y = c.y - 1;
-      } else if (mode === "side") {
-        camPos.copy(c).addScaledVector(_side, 26).addScaledVector(d, 2);
-        camPos.y = c.y + 11;
-        look.copy(c);
-        look.y = c.y - 2;
-      } else if (mode === "top") {
-        camPos.copy(c).addScaledVector(d, -6);
-        camPos.y = c.y + 46;
-        look.copy(c).addScaledVector(d, 4);
-        look.y = c.y - 6;
-      } else {
-        camPos.copy(c).addScaledVector(d, -23);
-        camPos.y = c.y + 19;
-        look.copy(c).addScaledVector(d, 12);
-        look.y = c.y - 6;
-      }
-    } else {
-      // pas de billes : cadre le haut du circuit
-      camPos.copy(S.spawnBase).addScaledVector(S.spawnFwd, -14);
-      camPos.y = S.spawnBase.y + 16;
-      look.copy(S.spawnBase).addScaledVector(S.spawnFwd, 10);
+      mode = AUTO_SEQ[S.camMode % AUTO_SEQ.length];
     }
-    camera.position.lerp(camPos, 0.05);
-    S.camLook.lerp(look, 0.06);
+    if (mode !== S.camLastMode) {
+      S.camCut = true;
+      S.camLastMode = mode;
+    }
+
+    const racing = S.phase === "racing" || S.phase === "intermission" || S.phase === "countdown";
+    let focusM = null;
+    let raw;
+    if (racing && S.marbles.length) {
+      if ((S.camOverride || cameraPref) === "focus" && S.focusPlayerId) {
+        focusM = leadMarbleOf(S.focusPlayerId);
+      }
+      if (!focusM) focusM = stableLead();
+      if (focusM) {
+        S.camHold.set(focusM.body.position.x, focusM.body.position.y, focusM.body.position.z);
+      }
+      raw = S.camHold;
+    } else {
+      // pas de billes : on cadre le haut du circuit, sans bouger
+      S.camHold.copy(S.spawnBase);
+      raw = S.camHold;
+    }
+    const c = updateAim(raw, dt);
+
+    // Direction suivie : vitesse horizontale de la bille suivie, fortement
+    // lissée, pour que le plan ne pivote pas à chaque rebond.
+    _tan.set(focusM ? focusM.body.velocity.x : 0, 0, focusM ? focusM.body.velocity.z : 0);
+    if (_tan.lengthSq() < 0.6) _tan.copy(S.camDir);
+    _tan.normalize();
+    damp(S.camDir, _tan, 1.1, dt);
+    S.camDir.y = 0;
+    if (S.camDir.lengthSq() < 0.001) S.camDir.set(0, 0, 1);
+    S.camDir.normalize();
+    const d = S.camDir;
+    _side.set(d.z, 0, -d.x).normalize();
+
+    const camPos = new THREE.Vector3();
+    const look = new THREE.Vector3();
+    if (!racing || !S.marbles.length) {
+      camPos.copy(S.spawnBase).addScaledVector(S.spawnFwd, -16);
+      camPos.y = S.spawnBase.y + 15;
+      look.copy(S.spawnBase).addScaledVector(S.spawnFwd, 10);
+    } else if (mode === "front") {
+      camPos.copy(c).addScaledVector(d, 17).addScaledVector(_side, 5);
+      camPos.y = c.y + 9;
+      look.copy(c).addScaledVector(d, -2);
+      look.y = c.y - 1;
+    } else if (mode === "side") {
+      camPos.copy(c).addScaledVector(_side, 26).addScaledVector(d, 2);
+      camPos.y = c.y + 11;
+      look.copy(c);
+      look.y = c.y - 2;
+    } else if (mode === "top") {
+      camPos.copy(c).addScaledVector(d, -6);
+      camPos.y = c.y + 46;
+      look.copy(c).addScaledVector(d, 4);
+      look.y = c.y - 6;
+    } else if (mode === "focus") {
+      camPos.copy(c).addScaledVector(d, -13).addScaledVector(_side, 7);
+      camPos.y = c.y + 8;
+      look.copy(c).addScaledVector(d, 6);
+      look.y = c.y - 1;
+    } else {
+      camPos.copy(c).addScaledVector(d, -23);
+      camPos.y = c.y + 19;
+      look.copy(c).addScaledVector(d, 12);
+      look.y = c.y - 6;
+    }
+
+    if (S.camCut) {
+      S.camCut = false;
+      S.camAim.copy(raw);
+      camera.position.copy(camPos);
+      S.camLook.copy(look);
+    } else {
+      damp(camera.position, camPos, CAM_POS_TAU, dt);
+      damp(S.camLook, look, CAM_LOOK_TAU, dt);
+    }
     camera.lookAt(S.camLook);
   }
 
@@ -662,7 +758,7 @@ export function createMarbleRace3D(canvas, opts = {}) {
       id: p.id,
       name: p.name,
       color: p.color,
-      balls: p.ballCount,
+      balls: p.ballCount || p.pending,
       full: p.full,
       finished: p.finishRank != null,
       avatar: p.img && p.img.complete ? p.img.src : null,
@@ -678,6 +774,8 @@ export function createMarbleRace3D(canvas, opts = {}) {
       count: S.phase === "countdown" ? Math.max(1, Math.ceil((COUNTDOWN_MS - (now - S.countdownStart)) / 1000)) : 0,
       connected: S.connected,
       players: S.players.size,
+      queued: queuedPlayers(),
+      need: MIN_PLAYERS,
       board: ordered,
       winner: S.winner
         ? { name: S.winner.name, color: S.winner.color, avatar: S.winner.img && S.winner.img.complete ? S.winner.img.src : null }
@@ -698,18 +796,35 @@ export function createMarbleRace3D(canvas, opts = {}) {
     if (S.phase === "countdown") {
       if (now - S.countdownStart >= COUNTDOWN_MS) releaseRace(now);
     } else if (S.phase === "filling") {
-      // Démarre seulement quand au moins MIN_PLAYERS joueurs différents ont des billes.
-      if (S.autoRace && S.players.size >= MIN_PLAYERS && now - S.phaseStart > 2500) startRace(now);
+      // Démarre quand assez de joueurs différents ont des billes EN ATTENTE.
+      if (S.autoRace && queuedPlayers() >= MIN_PLAYERS && now - S.phaseStart > 2500) startRace(now);
     } else if (S.phase === "racing") {
       const active = S.marbles.filter((m) => !m.finished);
       if ((active.length === 0 && S.marbles.length > 0) || now - S.raceStart > RACE_MAX_MS) endRace(now);
       if (S.marbles.length === 0 && now - S.raceStart > 6000) endRace(now);
     } else if (S.phase === "intermission") {
-      if (S.autoRace && S.players.size >= MIN_PLAYERS && now - S.phaseStart > INTERMISSION_MS) startRace(now);
+      // Fin de la célébration : on retire les joueurs de la course écoulée,
+      // puis on repasse en attente. La course suivante ne part que sur de
+      // nouveaux cadeaux.
+      if (now - S.phaseStart > INTERMISSION_MS) {
+        purgePlayers();
+        removeAllMarbles();
+        S.finishOrder = [];
+        S.winner = null;
+        S.phase = "filling";
+        S.phaseStart = now;
+        S.camCut = true;
+      }
     }
 
-    let budget = 3;
-    while (budget-- > 0 && S.spawnQueue.length) spawnMarble(S.spawnQueue.shift());
+    // Les billes n'apparaissent qu'au moment du placement (compte à rebours) :
+    // jamais pendant la course.
+    if (S.phase === "countdown" || S.phase === "filling") {
+      let budget = 4;
+      while (budget-- > 0 && S.spawnQueue.length) spawnMarble(S.spawnQueue.shift());
+    } else if (S.spawnQueue.length) {
+      S.spawnQueue.length = 0;
+    }
 
     world.step(1 / 60, dt, 3);
 
@@ -818,6 +933,9 @@ export function createMarbleRace3D(canvas, opts = {}) {
       killY: S.killY,
       minY: S.marbles.length ? minY : null,
       maxY: S.marbles.length ? maxY : null,
+      queued: queuedPlayers(),
+      cam: [camera.position.x, camera.position.y, camera.position.z].map((v) => Math.round(v * 100) / 100),
+      camMode: S.camLastMode,
     };
   }
 
@@ -834,8 +952,13 @@ export function createMarbleRace3D(canvas, opts = {}) {
     }
   }
   function focusPlayer(id) {
+    const changed = (id || null) !== S.focusPlayerId;
     S.focusPlayerId = id || null;
     S.camOverride = id ? "focus" : null;
+    if (changed) {
+      S.camCut = true; // on coupe sur la bille au lieu d'y glisser
+      if (id) S.leadId = id;
+    }
   }
   function getBoard() {
     return computeBoard(20);
@@ -848,10 +971,17 @@ export function createMarbleRace3D(canvas, opts = {}) {
       autoRace: S.autoRace,
       camMode: S.camOverride || cameraPref,
       focusPlayerId: S.focusPlayerId,
+      queued: queuedPlayers(),
+      need: MIN_PLAYERS,
+      canStart: queuedPlayers() >= MIN_FORCE_PLAYERS,
     };
   }
+  // Départ manuel depuis le panneau de contrôle : ignore le seuil automatique.
   function startRaceNow() {
+    if (S.phase === "countdown" || S.phase === "racing") return false;
+    if (queuedPlayers() < MIN_FORCE_PLAYERS) return false;
     startRace(performance.now());
+    return true;
   }
   function stopRaceNow() {
     if (S.phase === "racing") endRace(performance.now());
@@ -868,7 +998,14 @@ export function createMarbleRace3D(canvas, opts = {}) {
       settings = lvl.settings;
       cameraPref = settings.camera || "auto";
     }
-    startRace(performance.now());
+    removeAllMarbles();
+    buildTrack();
+    S.finishOrder = [];
+    S.winner = null;
+    S.spawnQueue = [];
+    S.phase = "filling";
+    S.phaseStart = performance.now();
+    S.camCut = true;
   }
 
   // Entrées clavier/souris (uniquement si controls=true)

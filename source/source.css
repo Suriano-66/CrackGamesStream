@@ -38,3 +38,60 @@ html,body{height:100%;background:#0b0f17;overflow:hidden;font-family:"Segoe UI",
   color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.85)}
 .conn{position:absolute;bottom:1.4cqw;right:3cqw;font-family:"JetBrains Mono",monospace;font-size:2.6cqw;font-weight:700;text-shadow:0 1px 4px rgba(0,0,0,.9)}
 .conn.on{color:#35d0a0}.conn.off{color:#93a1b8}
+
+/* ---- Bras de fer « Rouge vs Bleu » (barre de progression du noyau) ---- */
+.tug {
+  position: absolute;
+  left: 3.5%;
+  right: 3.5%;
+  top: 8.5%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 700 clamp(13px, 3.2vw, 22px) system-ui, sans-serif;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.75);
+}
+.tug[hidden] { display: none; }
+.tug-side { flex: 0 0 auto; letter-spacing: 0.5px; }
+.tug-r { color: #ff5f79; }
+.tug-b { color: #63b6ff; }
+.tug-bar {
+  position: relative;
+  flex: 1 1 auto;
+  height: clamp(10px, 2.4vw, 18px);
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(59, 163, 255, 0.35), rgba(255, 59, 92, 0.35));
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  overflow: visible;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+.tug-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 50%;
+  border-radius: 999px 0 0 999px;
+  background: linear-gradient(90deg, rgba(255, 59, 92, 0.15), rgba(255, 59, 92, 0.7));
+  transition: width 0.18s linear;
+}
+.tug-core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: clamp(16px, 3.6vw, 26px);
+  height: clamp(16px, 3.6vw, 26px);
+  margin: 0 0 0 calc(clamp(16px, 3.6vw, 26px) / -2);
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ffffff, #b9c6ff 60%, #7e8dd6);
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.75);
+  transition: left 0.18s linear;
+}
+
+/* File d'attente affichée pendant la phase d'attente. */
+.wait .queue {
+  display: block;
+  margin: 10px 0 4px;
+  font-size: clamp(20px, 5vw, 34px);
+  letter-spacing: 0.5px;
+}
+.wait .queue b { margin: 0 8px; }
