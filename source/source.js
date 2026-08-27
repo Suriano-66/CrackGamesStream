@@ -1,6 +1,11 @@
 // Fenêtre SOURCE : moteur du jeu + overlay minimaliste (texte seul) à capturer
 // dans OBS. Compte à rebours 3·2·1·GO, classement à droite avec médailles.
 import { getGame, DEFAULT_GAME } from "../engine/games.js";
+import { definirCatalogue } from "../engine/assets.js";
+import { CATALOGUE } from "../assets/models/catalogue.js";
+
+// Catalogue des modèles 3D, livré avec l'application (assets/models/).
+definirCatalogue(CATALOGUE);
 
 const bridge = window.src;
 const canvas = document.getElementById("c");

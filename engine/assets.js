@@ -48,6 +48,10 @@ export function definirCatalogue(liste) {
       icon: m.icon || "📦",
       taille: Array.isArray(m.taille) && m.taille.length === 3 ? m.taille : [1, 1, 1],
       centre: Array.isArray(m.centre) && m.centre.length === 3 ? m.centre : [0, 0.5, 0],
+      // Réglages appliqués automatiquement quand on pose le modèle : un
+      // obstacle du catalogue peut donc arriver déjà animé et déjà solide.
+      anim: m.anim && typeof m.anim === "object" ? { ...ANIM_DEFAUT, ...m.anim } : undefined,
+      solideParDefaut: !!m.solide,
     });
   }
   return MODELES;
