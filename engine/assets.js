@@ -191,7 +191,10 @@ export function animDe(piece) {
   const a = (piece && piece.anim) || null;
   if (!a) return { ...ANIM_DEFAUT };
   return {
-    type: a.type === "rotation" || a.type === "balancier" ? a.type : "aucune",
+    type:
+      a.type === "rotation" || a.type === "balancier" || a.type === "translation"
+        ? a.type
+        : "aucune",
     axe: a.axe === "x" || a.axe === "z" ? a.axe : "y",
     sens: Number(a.sens) < 0 ? -1 : 1,
     vitesse: isFinite(Number(a.vitesse)) ? Math.max(0, Number(a.vitesse)) : ANIM_DEFAUT.vitesse,
@@ -234,6 +237,29 @@ export function vitesseAnim(anim, t) {
   return 0;
 }
 
+// Décalage linéaire (va-et-vient) à l'instant t, en UNITÉS, le long de l'axe.
+// `amplitude` = distance de part et d'autre ; `vitesse` = allers-retours/minute.
+export function offsetAnim(anim, t) {
+  const a = anim.type ? anim : animDe({ anim });
+  if (a.type === "translation") {
+    const w = 2 * Math.PI * (a.vitesse / 60);
+    const phase = (a.phase * Math.PI) / 180;
+    return a.sens * a.amplitude * Math.sin(w * t + phase);
+  }
+  return 0;
+}
+// Vitesse linéaire à l'instant t (unités/seconde) — pour que la plateforme
+// mobile transmette son élan aux billes posées dessus.
+export function vitesseLineaireAnim(anim, t) {
+  const a = anim.type ? anim : animDe({ anim });
+  if (a.type === "translation") {
+    const w = 2 * Math.PI * (a.vitesse / 60);
+    const phase = (a.phase * Math.PI) / 180;
+    return a.sens * a.amplitude * w * Math.cos(w * t + phase);
+  }
+  return 0;
+}
+
 export function vecteurAxe(axe) {
   return axe === "x" ? [1, 0, 0] : axe === "z" ? [0, 0, 1] : [0, 1, 0];
 }
@@ -245,7 +271,14 @@ export function appliquerAnim(objet, piece, t) {
   const inner = objet && objet.userData && objet.userData.anime;
   if (!inner) return 0;
   const a = animDe(piece);
+  if (a.type === "translation") {
+    const off = offsetAnim(a, t);
+    inner.rotation.set(0, 0, 0);
+    inner.position.set(a.axe === "x" ? off : 0, a.axe === "y" ? off : 0, a.axe === "z" ? off : 0);
+    return off;
+  }
   const ang = angleAnim(a, t);
+  inner.position.set(0, 0, 0);
   inner.rotation.set(0, 0, 0);
   if (a.axe === "x") inner.rotation.x = ang;
   else if (a.axe === "z") inner.rotation.z = ang;

@@ -7,7 +7,7 @@
 // est une boîte de collision solide) : plus de trous sous les virages.
 import * as THREE from "three";
 import * as CANNON from "cannon-es";
-import { creerObjetModele, estModele, collisionModele, estAnimee, animDe, angleAnim, vitesseAnim, vecteurAxe, appliquerAnim } from "./assets.js";
+import { creerObjetModele, estModele, collisionModele, estAnimee, animDe, angleAnim, vitesseAnim, offsetAnim, vitesseLineaireAnim, vecteurAxe, appliquerAnim } from "./assets.js";
 
 // ----- Paramètres -----
 const MARBLE_R = 0.42;
@@ -34,6 +34,32 @@ const MIN_FORCE_PLAYERS = 2; // minimum pour un départ manuel depuis le panneau
 const COUNTDOWN_MS = 3000; // 3·2·1 avant le GO (billes retenues au départ)
 const D2R = Math.PI / 180;
 
+// Obstacles : combien de fois une bille peut réapparaître à un checkpoint avant
+// d'être éliminée pour de bon (évite les courses qui ne finissent jamais).
+const MAX_RESPAWN = 4;
+const BOOST_SPEED = 26; // vitesse imposée en traversant un accélérateur
+const BOOST_CAP = 36; // plafond de vitesse temporaire pendant un boost
+const BOOST_MS = 450; // durée pendant laquelle le plafond reste relevé
+const SPEED_CAP = 24; // plafond de vitesse normal (anti-éjection dans les virages)
+// Rôles qui sont un SOL solide (corps de collision). Les autres (hazard,
+// checkpoint) sont des zones que la bille traverse.
+const SOLID_ROLES = new Set(["track", "start", "finish", "wall", "bumper", "booster", "spinner", "mover"]);
+
+// Animation par défaut des obstacles mobiles : elles marchent « clé en main »,
+// sans réglage. Une pièce peut fournir son propre `anim` pour ajuster.
+const ROLE_ANIM = {
+  spinner: { type: "rotation", axe: "y", sens: 1, vitesse: 14, amplitude: 90, phase: 0 },
+  mover: { type: "translation", axe: "x", sens: 1, vitesse: 12, amplitude: 6, phase: 0 },
+};
+function resolveAnim(pl) {
+  const base = ROLE_ANIM[pl.role];
+  if (base) return Object.assign({}, base, pl.anim || {});
+  return pl.anim || null;
+}
+function animActive(a) {
+  return !!(a && a.type && a.type !== "aucune" && Number(a.vitesse) > 0);
+}
+
 // Circuit de secours minimal (si aucune plateforme n'est fournie).
 const FALLBACK_PLATFORMS = [
   { id: "s", role: "start", pos: [0, 16, 0], size: [14, 1, 12], rot: [16, 0, 0] },
@@ -46,6 +72,12 @@ const ROLE_COLORS = {
   start: 0x2fbf6b,
   finish: 0xffcf40,
   wall: 0xff3c5f,
+  bumper: 0xffb43c,
+  booster: 0x37d0ff,
+  hazard: 0xff4d2e,
+  checkpoint: 0x9b7bff,
+  spinner: 0xff6ad5,
+  mover: 0x59e0a0,
 };
 
 // Config cadeaux → billes (réglable depuis l'app Streamer).
@@ -135,11 +167,16 @@ export function createMarbleRace3D(canvas, opts = {}) {
   world.allowSleep = false;
   const matGround = new CANNON.Material("ground");
   const matBall = new CANNON.Material("ball");
+  const matBumper = new CANNON.Material("bumper");
   world.addContactMaterial(
     new CANNON.ContactMaterial(matGround, matBall, { friction: 0.16, restitution: 0.05 }),
   );
   world.addContactMaterial(
     new CANNON.ContactMaterial(matBall, matBall, { friction: 0.04, restitution: 0.2 }),
+  );
+  // Bumper : forte restitution → la bille rebondit vivement au contact.
+  world.addContactMaterial(
+    new CANNON.ContactMaterial(matBumper, matBall, { friction: 0.02, restitution: 1.3 }),
   );
 
   const S = {
@@ -149,6 +186,9 @@ export function createMarbleRace3D(canvas, opts = {}) {
     trackMeshes: [],
     animes: [], // obstacles animés : { piece, obj, corps, base }
     trackBodies: [],
+    boosters: [], // pads d'accélération : { center, half, quatInv }
+    hazards: [], // zones de chute / lave : { center, half, quatInv }
+    checkpoints: [], // portes de reprise : { center, half, quatInv, index, respawn, fwd }
     // repères de spawn / arrivée
     spawnFwd: new THREE.Vector3(0, 0, 1),
     spawnUp: new THREE.Vector3(0, 1, 0),
@@ -184,10 +224,26 @@ export function createMarbleRace3D(canvas, opts = {}) {
     frozen: false, // billes retenues pendant le compte à rebours
     countdownStart: 0,
     autoRace: opts.autoRace !== false, // true = les courses s'enchaînent seules
-    giftConfig: Object.assign({}, DEFAULT_GIFT, opts.giftConfig || {}),
+    // Cadeaux → billes : une grille du COMPTE (réglée dans l'app Streamer) et,
+    // éventuellement, une grille propre au NIVEAU qui prend le dessus quand elle
+    // existe. `giftConfig` est la grille EFFECTIVE (recalculée à chaque change).
+    giftBase: Object.assign({}, DEFAULT_GIFT, opts.giftConfig || {}),
+    giftLevel:
+      opts.level && opts.level.settings && opts.level.settings.giftConfig
+        ? Object.assign({}, DEFAULT_GIFT, opts.level.settings.giftConfig)
+        : null,
+    giftConfig: DEFAULT_GIFT,
     frameDt: 0.016,
+    totalRespawns: 0, // stat de débogage : réapparitions cumulées
     free: { pos: new THREE.Vector3(0, 40, -30), yaw: 0, pitch: -0.3, keys: new Set(), fast: false, slow: false },
   };
+
+  // Grille effective = niveau si présent, sinon compte. À rappeler dès qu'une
+  // des deux change.
+  function recomputeGift() {
+    S.giftConfig = S.giftLevel || S.giftBase;
+  }
+  recomputeGift();
 
   function rnd() {
     S.seed = (S.seed * 1103515245 + 12345) & 0x7fffffff;
@@ -197,17 +253,32 @@ export function createMarbleRace3D(canvas, opts = {}) {
   // ----- Matériaux plateformes -----
   const matCache = new Map();
   function platMat(role, color) {
-    const key = color || role || "track";
+    const key = (color || "") + "|" + (role || "track");
     if (matCache.has(key)) return matCache.get(key);
     const base = color
       ? new THREE.Color(color)
       : new THREE.Color(ROLE_COLORS[role] ?? ROLE_COLORS.track);
+    // Les obstacles brillent (emissive fort) pour se repérer d'un coup d'œil ;
+    // le checkpoint est translucide → une porte qu'on traverse.
+    const glow = { bumper: 0.55, booster: 0.55, hazard: 0.6, checkpoint: 0.5, spinner: 0.5, mover: 0.4 }[role];
+    const shiny = role === "bumper" || role === "booster" || role === "spinner" || role === "mover";
     const m = new THREE.MeshStandardMaterial({
       color: base,
-      roughness: role === "wall" ? 0.5 : 0.9,
-      metalness: role === "wall" ? 0.2 : 0.05,
-      emissive: role === "finish" ? new THREE.Color(0x4a3a00) : base.clone().multiplyScalar(0.05),
+      roughness: role === "wall" ? 0.5 : shiny ? 0.3 : 0.9,
+      metalness: role === "wall" ? 0.2 : shiny ? 0.45 : 0.05,
+      emissive:
+        glow != null
+          ? base.clone().multiplyScalar(glow)
+          : role === "finish"
+            ? new THREE.Color(0x4a3a00)
+            : base.clone().multiplyScalar(0.05),
     });
+    if (role === "checkpoint") {
+      m.transparent = true;
+      m.opacity = 0.32;
+      m.depthWrite = false;
+      m.side = THREE.DoubleSide;
+    }
     matCache.set(key, m);
     return m;
   }
@@ -227,6 +298,9 @@ export function createMarbleRace3D(canvas, opts = {}) {
     S.trackMeshes = [];
     S.trackBodies = [];
     S.animes = [];
+    S.boosters = [];
+    S.hazards = [];
+    S.checkpoints = [];
   }
 
   function buildTrack() {
@@ -281,39 +355,84 @@ export function createMarbleRace3D(canvas, opts = {}) {
         continue;
       }
 
-      const mesh = new THREE.Mesh(_unit, platMat(pl.role, pl.color));
+      const role = pl.role || "track";
+      const mesh = new THREE.Mesh(_unit, platMat(role, pl.color));
       mesh.scale.set(Math.max(0.2, size[0]), Math.max(0.2, size[1]), Math.max(0.2, size[2]));
       mesh.position.set(pos[0], pos[1], pos[2]);
       mesh.quaternion.copy(q);
       scene.add(mesh);
       S.trackMeshes.push(mesh);
 
-      const body = new CANNON.Body({ mass: 0, material: matGround });
-      body.addShape(
-        new CANNON.Box(
-          new CANNON.Vec3(
-            Math.max(0.1, size[0] / 2),
-            Math.max(0.1, size[1] / 2),
-            Math.max(0.1, size[2] / 2),
-          ),
-        ),
+      // Repère local de la pièce, pour tester si une bille est « dedans ».
+      const half = new THREE.Vector3(
+        Math.max(0.1, size[0] / 2),
+        Math.max(0.1, size[1] / 2),
+        Math.max(0.1, size[2] / 2),
       );
-      body.position.set(pos[0], pos[1], pos[2]);
-      body.quaternion.set(q.x, q.y, q.z, q.w);
-      world.addBody(body);
-      S.trackBodies.push(body);
+      const center = new THREE.Vector3(pos[0], pos[1], pos[2]);
+      const quatInv = q.clone().invert();
 
-      if (pos[1] < minY) minY = pos[1];
-      if (pos[1] > highY) {
-        highY = pos[1];
-        highPlat = pl;
+      // Corps de collision solide (sol) — sauf pour les zones traversables.
+      // Un obstacle mobile (spinner/mover) a un corps CINÉMATIQUE : piloté à la
+      // main chaque image, il projette et porte les billes au lieu de les
+      // traverser.
+      if (SOLID_ROLES.has(role)) {
+        const anim = resolveAnim(pl);
+        const animated = animActive(anim);
+        const body = new CANNON.Body({
+          mass: 0,
+          type: animated ? CANNON.Body.KINEMATIC : CANNON.Body.STATIC,
+          material: role === "bumper" ? matBumper : matGround,
+        });
+        body.addShape(new CANNON.Box(new CANNON.Vec3(half.x, half.y, half.z)));
+        body.position.set(pos[0], pos[1], pos[2]);
+        body.quaternion.set(q.x, q.y, q.z, q.w);
+        if (animated) body.updateMassProperties();
+        world.addBody(body);
+        S.trackBodies.push(body);
+        if (animated) {
+          S.animes.push({
+            box: true,
+            piece: pl,
+            mesh,
+            corps: body,
+            basePos: center.clone(),
+            baseQuat: q.clone(),
+            anim,
+          });
+        }
       }
-      if (pos[1] < lowY) {
-        lowY = pos[1];
-        lowPlat = pl;
+
+      // Zones à effet (traversées par la bille).
+      if (role === "booster") {
+        S.boosters.push({ center, half, quatInv });
+      } else if (role === "hazard") {
+        S.hazards.push({ center, half, quatInv });
+      } else if (role === "checkpoint") {
+        // Point de réapparition : au-dessus de la porte, sur sa surface.
+        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize();
+        let fwd = new THREE.Vector3(0, -1, 0);
+        fwd.addScaledVector(up, -fwd.dot(up));
+        if (fwd.lengthSq() < 1e-4) fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+        fwd.normalize();
+        const respawn = center.clone().addScaledVector(up, half.y + MARBLE_R + 0.6);
+        S.checkpoints.push({ center, half, quatInv, index: S.checkpoints.length, respawn, fwd });
       }
-      if (pl.role === "start" && !startPlat) startPlat = pl;
-      if (pl.role === "finish" && !finishPlat) finishPlat = pl;
+
+      // Seul le sol solide compte pour le repérage départ/arrivée et le killY.
+      if (SOLID_ROLES.has(role)) {
+        if (pos[1] < minY) minY = pos[1];
+        if (pos[1] > highY) {
+          highY = pos[1];
+          highPlat = pl;
+        }
+        if (pos[1] < lowY) {
+          lowY = pos[1];
+          lowPlat = pl;
+        }
+        if (role === "start" && !startPlat) startPlat = pl;
+        if (role === "finish" && !finishPlat) finishPlat = pl;
+      }
     }
 
     // --- Repère de spawn depuis la plateforme de départ (ou la plus haute) ---
@@ -404,7 +523,57 @@ export function createMarbleRace3D(canvas, opts = {}) {
       }),
     );
     scene.add(mesh);
-    S.marbles.push({ body, mesh, playerId: p.id, finished: false });
+    S.marbles.push({ body, mesh, playerId: p.id, finished: false, respawns: 0, cpIndex: -1, cp: null, boostUntil: 0 });
+  }
+
+  // ----- Zones d'obstacles (booster / hazard / checkpoint) -----
+  const _zoneP = new THREE.Vector3();
+  // Vrai si le centre de la bille est dans la boîte orientée de la zone.
+  function inZone(bp, z, mx, my, mz) {
+    _zoneP.set(bp.x - z.center.x, bp.y - z.center.y, bp.z - z.center.z).applyQuaternion(z.quatInv);
+    return (
+      Math.abs(_zoneP.x) <= z.half.x + mx &&
+      Math.abs(_zoneP.y) <= z.half.y + my &&
+      Math.abs(_zoneP.z) <= z.half.z + mz
+    );
+  }
+  function canRespawn(m) {
+    return S.checkpoints.length > 0 && (m.respawns || 0) < MAX_RESPAWN;
+  }
+  // Réapparition au dernier checkpoint franchi (ou au départ si aucun).
+  function respawnMarble(m) {
+    m.respawns = (m.respawns || 0) + 1;
+    S.totalRespawns++;
+    const cp = m.cp;
+    const base = cp ? cp.pos : S.spawnBase.clone().addScaledVector(S.spawnUp, MARBLE_R + 0.6);
+    const fwd = cp ? cp.fwd : S.spawnFwd;
+    m.body.position.set(base.x, base.y, base.z);
+    m.body.velocity.set(fwd.x * 3, 0, fwd.z * 3);
+    m.body.angularVelocity.set(0, 0, 0);
+    m.body.wakeUp();
+    m.boostUntil = 0;
+  }
+  // Traversée d'un accélérateur : relance la bille dans son sens de marche.
+  function applyBoost(m, now) {
+    const v = m.body.velocity;
+    let dx = v.x,
+      dz = v.z;
+    const hs = Math.hypot(dx, dz);
+    if (hs > 0.4) {
+      dx /= hs;
+      dz /= hs;
+    } else {
+      dx = S.spawnFwd.x;
+      dz = S.spawnFwd.z;
+      const n = Math.hypot(dx, dz) || 1;
+      dx /= n;
+      dz /= n;
+    }
+    if (hs < BOOST_SPEED) {
+      v.x = dx * BOOST_SPEED;
+      v.z = dz * BOOST_SPEED;
+    }
+    m.boostUntil = now + BOOST_MS;
   }
   function queueSpawns(p, n) {
     for (let i = 0; i < n; i++) S.spawnQueue.push(p);
@@ -833,6 +1002,39 @@ export function createMarbleRace3D(canvas, opts = {}) {
   const _qFinal = new THREE.Quaternion();
   function majAnimes(tSec) {
     for (const a of S.animes) {
+      // ── Boîte animée (spinner / plateforme mobile) ──
+      if (a.box) {
+        const anim = a.anim;
+        const v = vecteurAxe(anim.axe);
+        if (anim.type === "translation") {
+          const off = offsetAnim(anim, tSec);
+          _axeVec.set(v[0], v[1], v[2]).applyQuaternion(a.baseQuat);
+          const px = a.basePos.x + _axeVec.x * off;
+          const py = a.basePos.y + _axeVec.y * off;
+          const pz = a.basePos.z + _axeVec.z * off;
+          a.mesh.position.set(px, py, pz);
+          a.mesh.quaternion.copy(a.baseQuat);
+          const lv = vitesseLineaireAnim(anim, tSec);
+          a.corps.position.set(px, py, pz);
+          a.corps.quaternion.set(a.baseQuat.x, a.baseQuat.y, a.baseQuat.z, a.baseQuat.w);
+          a.corps.velocity.set(_axeVec.x * lv, _axeVec.y * lv, _axeVec.z * lv);
+          a.corps.angularVelocity.set(0, 0, 0);
+        } else {
+          const ang = angleAnim(anim, tSec);
+          _axeVec.set(v[0], v[1], v[2]);
+          _axeQuat.setFromAxisAngle(_axeVec, ang);
+          _qFinal.copy(a.baseQuat).multiply(_axeQuat);
+          a.mesh.quaternion.copy(_qFinal);
+          a.mesh.position.copy(a.basePos);
+          a.corps.quaternion.set(_qFinal.x, _qFinal.y, _qFinal.z, _qFinal.w);
+          a.corps.position.copy(a.basePos);
+          const w = vitesseAnim(anim, tSec);
+          _axeVec.set(v[0], v[1], v[2]).applyQuaternion(a.baseQuat).multiplyScalar(w);
+          a.corps.angularVelocity.set(_axeVec.x, _axeVec.y, _axeVec.z);
+          a.corps.velocity.set(0, 0, 0);
+        }
+        continue;
+      }
       const cfg = animDe(a.piece);
       const ang = appliquerAnim(a.obj, a.piece, tSec);
       if (!a.corps) continue;
@@ -903,13 +1105,55 @@ export function createMarbleRace3D(canvas, opts = {}) {
       m.mesh.position.set(bp.x, bp.y, bp.z);
       m.mesh.quaternion.set(m.body.quaternion.x, m.body.quaternion.y, m.body.quaternion.z, m.body.quaternion.w);
       // Plafond de vitesse : évite l'éjection des billes dans les virages.
+      // Relevé un court instant après un accélérateur, sinon le boost serait
+      // aussitôt annulé par le plafond normal.
+      const boosting = m.boostUntil && now < m.boostUntil;
+      const cap = boosting ? BOOST_CAP : SPEED_CAP;
       const vel = m.body.velocity;
       const sp = Math.hypot(vel.x, vel.y, vel.z);
-      if (sp > 24) {
-        const kk = 24 / sp;
+      if (sp > cap) {
+        const kk = cap / sp;
         vel.x *= kk;
         vel.y *= kk;
         vel.z *= kk;
+      }
+      // Checkpoints : mémorise la dernière porte franchie (pour la reprise).
+      if (S.checkpoints.length) {
+        for (const z of S.checkpoints) {
+          if (z.index > m.cpIndex && inZone(bp, z, MARBLE_R, MARBLE_R, MARBLE_R)) {
+            m.cpIndex = z.index;
+            m.cp = { pos: z.respawn.clone(), fwd: z.fwd };
+          }
+        }
+      }
+      // Accélérateurs : coup de fouet dans le sens de marche.
+      if (S.boosters.length) {
+        for (const z of S.boosters) {
+          if (inZone(bp, z, MARBLE_R * 0.6, MARBLE_R + 0.4, MARBLE_R * 0.6)) {
+            applyBoost(m, now);
+            break;
+          }
+        }
+      }
+      // Zones de chute / lave : réapparition au checkpoint, sinon élimination.
+      if (S.hazards.length) {
+        let hit = false;
+        for (const z of S.hazards) {
+          if (inZone(bp, z, MARBLE_R, MARBLE_R, MARBLE_R)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) {
+          if (canRespawn(m)) {
+            respawnMarble(m);
+            continue;
+          }
+          m.finished = true;
+          world.removeBody(m.body);
+          scene.remove(m.mesh);
+          continue;
+        }
       }
       // Arrivée
       if (S.finishCenter) {
@@ -928,8 +1172,12 @@ export function createMarbleRace3D(canvas, opts = {}) {
           continue;
         }
       }
-      // Chute hors circuit
+      // Chute hors circuit : réapparition au checkpoint, sinon élimination.
       if (bp.y < S.killY) {
+        if (canRespawn(m)) {
+          respawnMarble(m);
+          continue;
+        }
         m.finished = true;
         world.removeBody(m.body);
         scene.remove(m.mesh);
@@ -993,10 +1241,28 @@ export function createMarbleRace3D(canvas, opts = {}) {
       if (y < minY) minY = y;
       if (y > maxY) maxY = y;
     }
+    let boosted = 0;
+    const nowP = performance.now();
+    for (const m of S.marbles) if (m.boostUntil && nowP < m.boostUntil) boosted++;
     return {
       phase: S.phase,
       live: S.marbles.length,
       finished: S.finishOrder.length,
+      respawns: S.totalRespawns,
+      boosted,
+      zones: { boosters: S.boosters.length, hazards: S.hazards.length, checkpoints: S.checkpoints.length },
+      gift: { source: S.giftLevel ? "niveau" : "compte", default: S.giftConfig.default, cap: S.giftConfig.maxPerPlayer, byGift: S.giftConfig.byGift },
+      anim: S.animes
+        .filter((a) => a.box)
+        .slice(0, 4)
+        .map((a) => ({
+          role: a.piece.role,
+          moved: Math.round(a.mesh.position.distanceTo(a.basePos) * 100) / 100,
+          spin:
+            Math.round(
+              Math.hypot(a.corps.angularVelocity.x, a.corps.angularVelocity.y, a.corps.angularVelocity.z) * 100,
+            ) / 100,
+        })),
       killY: S.killY,
       minY: S.marbles.length ? minY : null,
       maxY: S.marbles.length ? maxY : null,
@@ -1056,14 +1322,19 @@ export function createMarbleRace3D(canvas, opts = {}) {
   function setAutoRace(v) {
     S.autoRace = !!v;
   }
+  // Grille du COMPTE (app Streamer). Ne touche pas à l'éventuelle grille du niveau.
   function setGiftConfig(cfg) {
-    if (cfg && typeof cfg === "object") S.giftConfig = Object.assign({}, S.giftConfig, cfg);
+    if (cfg && typeof cfg === "object") S.giftBase = Object.assign({}, DEFAULT_GIFT, S.giftBase, cfg);
+    recomputeGift();
   }
   function loadLevel(lvl) {
     if (lvl && Array.isArray(lvl.platforms) && lvl.platforms.length) levelPlatforms = lvl.platforms;
     if (lvl && lvl.settings) {
       settings = lvl.settings;
       cameraPref = settings.camera || "auto";
+      // Grille cadeaux propre au niveau (prioritaire), ou retour au compte.
+      S.giftLevel = settings.giftConfig ? Object.assign({}, DEFAULT_GIFT, settings.giftConfig) : null;
+      recomputeGift();
     }
     removeAllMarbles();
     buildTrack();
