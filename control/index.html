@@ -9,8 +9,9 @@
 <body>
   <header class="top">
     <div class="brand"><span class="dot"></span> CrackGames <b>Stream</b></div>
-    <span class="phase" id="phasePill">—</span>
+    <span class="phase is-wait" id="phasePill">En attente</span>
     <div class="spacer"></div>
+    <span class="live-badge" id="liveBadge" hidden><span class="lb-dot"></span> LIVE</span>
     <span class="userchip" id="userChip" hidden>
       <span class="uc-name" id="userName"></span>
       <span class="uc-role">Streamer</span>
@@ -18,30 +19,44 @@
     </span>
   </header>
 
-  <!-- Barre TikTok + Source -->
+  <!-- Bandeau connexion : TikTok + fenêtre source -->
   <div class="bars">
     <div class="bar">
-      <span class="bar-h">TikTok Live</span>
-      <input id="ttUser" placeholder="@ton_pseudo" />
-      <button id="ttConnect" class="btn">Connecter</button>
-      <button id="ttDisconnect" class="btn ghost">Déconnecter</button>
-      <span id="ttStatus" class="status off">● non connecté</span>
+      <div class="bar-top">
+        <span class="bar-ico">📡</span>
+        <span class="bar-h">TikTok Live</span>
+        <span id="ttStatus" class="status off">Non connecté</span>
+      </div>
+      <div class="bar-row">
+        <input id="ttUser" placeholder="@ton_pseudo" />
+        <button id="ttConnect" class="btn primary sm">Connecter</button>
+        <button id="ttDisconnect" class="btn sm">Déconnecter</button>
+      </div>
     </div>
     <div class="bar">
-      <span class="bar-h">Fenêtre source (OBS)</span>
-      <button id="srcShow" class="btn">Afficher</button>
-      <button id="srcHide" class="btn ghost">Masquer</button>
-      <button id="srcFocus" class="btn ghost">Mettre au premier plan</button>
-      <span class="hint">Dans OBS : capture la fenêtre « CrackGames Stream — SOURCE ».</span>
+      <div class="bar-top">
+        <span class="bar-ico">🖥️</span>
+        <span class="bar-h">Fenêtre source (OBS)</span>
+      </div>
+      <div class="bar-row">
+        <button id="srcShow" class="btn sm">Afficher</button>
+        <button id="srcHide" class="btn sm">Masquer</button>
+        <button id="srcFocus" class="btn sm">Premier plan</button>
+        <span class="hint grow">Dans OBS : capture la fenêtre « CrackGames Stream — SOURCE ».</span>
+      </div>
     </div>
   </div>
 
   <div class="workspace">
     <!-- Classement -->
     <section class="panel board-panel">
-      <div class="panel-h">🏆 Classement en direct <span class="muted small" id="playersInfo"></span></div>
+      <div class="panel-h"><span>🏆 Classement en direct</span> <span id="playersInfo"></span></div>
       <div id="board" class="board"></div>
-      <div id="boardEmpty" class="muted small" style="padding:14px">En attente de participants… (mode démo actif tant que TikTok n'est pas connecté)</div>
+      <div id="boardEmpty" class="empty">
+        <div class="empty-ico">🏁</div>
+        <div class="empty-title">En attente de participants</div>
+        <div class="empty-sub">Le classement s'affiche dès qu'un joueur offre un cadeau.<br>Mode démo actif tant que TikTok n'est pas connecté.</div>
+      </div>
       <div class="board-note">Clique un joueur pour <b>centrer la caméra</b> dessus.</div>
     </section>
 
@@ -50,18 +65,17 @@
       <div class="group">
         <div class="group-h">Course</div>
         <div class="btn-row">
-          <button id="raceStart" class="btn big">▶ Démarrer</button>
+          <button id="raceStart" class="btn big primary">▶ Démarrer</button>
           <button id="raceStop" class="btn big ghost">⏹ Arrêter</button>
         </div>
         <label class="toggle"><input type="checkbox" id="autoRace" checked> <span>Tout automatique (les courses s'enchaînent seules)</span></label>
-        <button id="demoToggle" class="btn ghost" hidden style="margin-top:10px">🧪 Démo (dev) : OFF</button>
-        <div class="hint" id="minInfo">Une course démarre dès que <b>2 joueurs différents</b> ont offert un cadeau.</div>
+        <button id="demoToggle" class="btn ghost sm" hidden style="margin-top:12px">🧪 Démo (dev) : OFF</button>
+        <div class="hint" id="minInfo" style="margin-top:11px">Une course démarre dès que <b>2 joueurs différents</b> ont offert un cadeau.</div>
       </div>
 
       <div class="group">
         <div class="group-h">Caméra</div>
-        <div class="cam-grid">
-        </div>
+        <div class="cam-grid"></div>
         <div id="focusInfo" class="focus-info" hidden></div>
         <div class="hint">Vue <b>Libre</b> : dans la fenêtre source, <b>Z Q S D</b> pour te déplacer, <b>souris</b> pour regarder, <b>Ctrl</b> accélère, <b>Shift</b> ralentit, <b>Espace/C</b> monter/descendre.</div>
       </div>

@@ -296,11 +296,17 @@ function onSource(msg) {
     renderBoard(msg.board || []);
     const info = msg.info || {};
     const enCours = info.phase === "racing" || info.phase === "battle" || info.phase === "countdown";
-    $("#phasePill").textContent = enCours
-      ? "● Manche en cours"
-      : info.phase === "intermission"
-        ? "Résultats…"
-        : "En attente de joueurs";
+    const pill = $("#phasePill");
+    if (enCours) {
+      pill.className = "phase is-live";
+      pill.textContent = "Manche en cours";
+    } else if (info.phase === "intermission") {
+      pill.className = "phase is-result";
+      pill.textContent = "Résultats";
+    } else {
+      pill.className = "phase is-wait";
+      pill.textContent = "En attente";
+    }
     // File d'attente : combien de joueurs ont offert pour la PROCHAINE manche.
     let attente;
     if (state.gameType === "team-war") {
@@ -326,18 +332,24 @@ function onSource(msg) {
     focusPlayer(msg.playerId, el ? el.querySelector(".nm").textContent : msg.playerId);
   } else if (msg.type === "tiktok") {
     const st = $("#ttStatus");
+    const live = $("#liveBadge");
     if (msg.status === "connected") {
       st.className = "status on";
-      st.textContent = "● connecté @" + (msg.username || "");
+      st.textContent = "Connecté @" + (msg.username || "");
+      if (live) live.hidden = false;
     } else if (msg.status === "connecting") {
       st.className = "status warn";
-      st.textContent = "● connexion…";
+      st.textContent = "Connexion…";
+      if (live) live.hidden = true;
     } else if (msg.status === "error") {
       st.className = "status err";
-      st.textContent = "● " + (msg.error || "erreur");
+      st.textContent = "Erreur";
+      if (live) live.hidden = true;
+      toast(msg.error || "Erreur de connexion TikTok", "err");
     } else {
       st.className = "status off";
-      st.textContent = "● non connecté";
+      st.textContent = "Non connecté";
+      if (live) live.hidden = true;
     }
   } else if (msg.type === "gift") {
     if (msg.giftName) {
