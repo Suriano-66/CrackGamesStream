@@ -125,6 +125,106 @@ export function createMarbleRace3D(canvas, opts = {}) {
   sun.position.set(-40, 80, -20);
   scene.add(sun);
 
+  // ───────────── Juice : particules · secousse caméra · ralenti ─────────────
+  // Effets purement cosmétiques (Math.random, jamais le RNG déterministe de la
+  // course) : cadeau → gerbe colorée, gagnant → confettis + ralenti + secousse.
+  const PMAX = 500;
+  const _pPos = new Float32Array(PMAX * 3);
+  const _pCol = new Float32Array(PMAX * 3);
+  const _pGeo = new THREE.BufferGeometry();
+  _pGeo.setAttribute("position", new THREE.BufferAttribute(_pPos, 3));
+  _pGeo.setAttribute("color", new THREE.BufferAttribute(_pCol, 3));
+  _pGeo.setDrawRange(0, 0);
+  const _pMat = new THREE.PointsMaterial({
+    size: 0.6,
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    sizeAttenuation: true,
+  });
+  const _points = new THREE.Points(_pGeo, _pMat);
+  _points.frustumCulled = false;
+  scene.add(_points);
+  const _parts = [];
+  const _tmpCol = new THREE.Color();
+  function emitBurst(pos, color, n, opt) {
+    opt = opt || {};
+    _tmpCol.set(color || "#ffffff");
+    const speed = opt.speed || 7;
+    const up = opt.up != null ? opt.up : 0.7;
+    const life = opt.life || 0.9;
+    const spread = opt.spread != null ? opt.spread : 0.5;
+    for (let i = 0; i < n && _parts.length < PMAX; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = speed * (0.35 + Math.random());
+      _parts.push({
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        vx: Math.cos(a) * s * spread,
+        vy: (up + Math.random()) * s,
+        vz: Math.sin(a) * s * spread,
+        life: life * (0.7 + Math.random() * 0.6),
+        max: life,
+        r: _tmpCol.r,
+        g: _tmpCol.g,
+        b: _tmpCol.b,
+      });
+    }
+  }
+  const CONFETTI_COLORS = ["#ff3c5f", "#37d0ff", "#ffcf40", "#59e0a0", "#ff6ad5", "#ffffff"];
+  function confettiBurst(pos) {
+    for (let k = 0; k < 100 && _parts.length < PMAX; k++) {
+      emitBurst(pos, CONFETTI_COLORS[k % CONFETTI_COLORS.length], 1, { speed: 13, up: 1.1, life: 1.6, spread: 0.9 });
+    }
+  }
+  function updateParticles(dt) {
+    let n = 0;
+    for (let i = 0; i < _parts.length; i++) {
+      const p = _parts[i];
+      p.life -= dt;
+      if (p.life <= 0) continue;
+      p.vy -= 16 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      const k = p.life / p.max;
+      _pPos[n * 3] = p.x;
+      _pPos[n * 3 + 1] = p.y;
+      _pPos[n * 3 + 2] = p.z;
+      _pCol[n * 3] = p.r * k;
+      _pCol[n * 3 + 1] = p.g * k;
+      _pCol[n * 3 + 2] = p.b * k;
+      if (n !== i) _parts[n] = p;
+      n++;
+    }
+    _parts.length = n;
+    _pGeo.setDrawRange(0, n);
+    _pGeo.attributes.position.needsUpdate = true;
+    _pGeo.attributes.color.needsUpdate = true;
+  }
+  // Secousse caméra (ne remplace une secousse en cours que si plus forte).
+  let _shakeT = 0;
+  let _shakeAmp = 0;
+  let _shakeDur = 0.4;
+  function addShake(amp, dur) {
+    const cur = _shakeDur > 0 ? _shakeAmp * (_shakeT / _shakeDur) : 0;
+    if (amp >= cur) {
+      _shakeAmp = amp;
+      _shakeDur = dur || 0.4;
+      _shakeT = _shakeDur;
+    }
+  }
+  // Ralenti cinématique (n'affecte que la physique, pas la logique de course).
+  let _timeScale = 1;
+  let _timeScaleTarget = 1;
+  let _slowT = 0;
+  function slowmo(factor, dur) {
+    _timeScaleTarget = factor;
+    _slowT = dur || 0.6;
+  }
+
   // ----- Skybox (procédurale : dégradé + étoiles) -----
   function buildSky() {
     const c = document.createElement("canvas");
@@ -670,8 +770,12 @@ export function createMarbleRace3D(canvas, opts = {}) {
     }
     // Le cadeau alimente la course SUIVANTE, jamais celle en cours : une fois
     // le départ donné, plus aucune bille n'apparaît.
-    p.pending = Math.min(cap, p.pending + marblesForGift(giftName, count, S.giftConfig));
+    const add = marblesForGift(giftName, count, S.giftConfig);
+    p.pending = Math.min(cap, p.pending + add);
     if (p.pending >= cap) p.full = true;
+    // Juice : gerbe colorée à la zone de départ ; secousse si gros cadeau.
+    emitBurst(S.spawnBase, p.color, Math.min(44, 10 + add), { speed: 8, up: 0.9, life: 1.0 });
+    if (add >= 20) addShake(0.6, 0.35);
   }
   // Joueurs ayant des billes en attente pour la prochaine course.
   function queuedPlayers() {
@@ -944,6 +1048,14 @@ export function createMarbleRace3D(canvas, opts = {}) {
       damp(camera.position, camPos, CAM_POS_TAU, dt);
       damp(S.camLook, look, CAM_LOOK_TAU, dt);
     }
+    // Secousse caméra (juice) : petit décalage aléatoire qui s'atténue.
+    if (_shakeT > 0) {
+      _shakeT -= dt;
+      const a = _shakeAmp * Math.max(0, _shakeT / _shakeDur);
+      camera.position.x += (Math.random() - 0.5) * a;
+      camera.position.y += (Math.random() - 0.5) * a;
+      camera.position.z += (Math.random() - 0.5) * a;
+    }
     camera.lookAt(S.camLook);
   }
 
@@ -1094,8 +1206,15 @@ export function createMarbleRace3D(canvas, opts = {}) {
       S.spawnQueue.length = 0;
     }
 
+    // Ralenti cinématique : on ralentit la PHYSIQUE, pas la logique de course.
+    _timeScale += (_timeScaleTarget - _timeScale) * Math.min(1, dt * 8);
+    if (_slowT > 0) {
+      _slowT -= dt;
+      if (_slowT <= 0) _timeScaleTarget = 1;
+    }
     majAnimes(now / 1000);
-    world.step(1 / 60, dt, 3);
+    world.step(1 / 60, dt * _timeScale, 3);
+    updateParticles(dt);
 
     const doNudge = now - S.lastNudge > 700;
     if (doNudge) S.lastNudge = now;
@@ -1164,8 +1283,18 @@ export function createMarbleRace3D(canvas, opts = {}) {
           m.finished = true;
           const p = S.players.get(m.playerId);
           if (p && p.finishRank == null) {
+            const isWinner = S.finishOrder.length === 0;
             p.finishRank = S.finishOrder.length + 1;
             S.finishOrder.push(p);
+            // Juice : chaque arrivée fait une petite gerbe ; le PREMIER déclenche
+            // confettis + ralenti + secousse + gros plan sur le gagnant.
+            emitBurst({ x: bp.x, y: bp.y, z: bp.z }, p.color, 28, { speed: 9, up: 1.1, life: 1.1 });
+            if (isWinner) {
+              confettiBurst({ x: bp.x, y: bp.y + 2, z: bp.z });
+              addShake(1.1, 0.5);
+              slowmo(0.35, 0.7);
+              focusPlayer(p.id);
+            }
           }
           world.removeBody(m.body);
           scene.remove(m.mesh);
@@ -1252,6 +1381,7 @@ export function createMarbleRace3D(canvas, opts = {}) {
       boosted,
       zones: { boosters: S.boosters.length, hazards: S.hazards.length, checkpoints: S.checkpoints.length },
       gift: { source: S.giftLevel ? "niveau" : "compte", default: S.giftConfig.default, cap: S.giftConfig.maxPerPlayer, byGift: S.giftConfig.byGift },
+      juice: { particles: _parts.length, timeScale: Math.round(_timeScale * 100) / 100, shake: Math.round(_shakeT * 100) / 100 },
       anim: S.animes
         .filter((a) => a.box)
         .slice(0, 4)

@@ -23,6 +23,102 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
+// ---- Overlay juice : alertes cadeaux + combos -------------------------------
+const GIFT_EMOJI = {
+  Rose: "🌹", GG: "💚", "Finger Heart": "🫰", Lion: "🦁", TikTok: "🎵",
+  Heart: "❤️", "Heart Me": "💖", Galaxy: "🌌", "Universe": "🪐", Rocket: "🚀",
+  "Doughnut": "🍩", "Perfume": "🌸", "Sports Car": "🏎️", "Diamond": "💎", "Crown": "👑",
+};
+function giftEmoji(name) { return GIFT_EMOJI[name] || "🎁"; }
+
+// Palier visuel selon la valeur du cadeau (diamants × répétitions).
+function tierOf(diamonds, count) {
+  const total = (diamonds || 0) * (count || 1);
+  if (total >= 500) return "t3";
+  if (total >= 100) return "t2";
+  if (total >= 20) return "t1";
+  return "t0";
+}
+
+function initialOf(name) {
+  return (String(name || "").trim().charAt(0) || "?").toUpperCase();
+}
+
+// Toast d'alerte cadeau : avatar (image ou initiale) + pseudo + cadeau ×count.
+function showGiftAlert(ev) {
+  const box = document.getElementById("giftAlerts");
+  if (!box || !ev) return;
+
+  const el = document.createElement("div");
+  el.className = "ga " + tierOf(ev.diamonds, ev.count);
+
+  // Avatar : image si dispo, sinon pastille avec l'initiale.
+  let av;
+  if (ev.avatar) {
+    av = document.createElement("img");
+    av.className = "ga-av";
+    av.src = ev.avatar;
+    av.alt = "";
+    av.onerror = () => {
+      const s = document.createElement("span");
+      s.className = "ga-av ga-init";
+      s.textContent = initialOf(ev.nickname);
+      av.replaceWith(s);
+    };
+  } else {
+    av = document.createElement("span");
+    av.className = "ga-av ga-init";
+    av.textContent = initialOf(ev.nickname);
+  }
+
+  const body = document.createElement("div");
+  body.className = "ga-body";
+  const times = (ev.count || 1) > 1 ? ` <b class="ga-x">×${ev.count}</b>` : "";
+  body.innerHTML =
+    `<span class="ga-name">${esc(ev.nickname || "?")}</span>` +
+    `<span class="ga-gift">${giftEmoji(ev.giftName)} ${esc(ev.giftName || "cadeau")}${times}</span>`;
+
+  el.appendChild(av);
+  el.appendChild(body);
+  box.appendChild(el);
+  while (box.children.length > 4) box.removeChild(box.firstChild);
+
+  const life = el.classList.contains("t3") ? 5200 : el.classList.contains("t2") ? 4600 : 4000;
+  setTimeout(() => {
+    el.classList.add("ga-out");
+    setTimeout(() => el.remove(), 400);
+  }, life);
+
+  bumpCombo(ev.count || 1);
+}
+
+// Compteur de combos : additionne les cadeaux tant qu'ils s'enchaînent.
+let comboN = 0;
+let comboAt = 0;
+let comboTimer = null;
+const COMBO_WINDOW = 2600;
+function bumpCombo(inc) {
+  const now = performance.now();
+  if (now - comboAt > COMBO_WINDOW) comboN = 0; // fenêtre écoulée → on repart
+  comboAt = now;
+  comboN += inc;
+
+  const box = document.getElementById("combo");
+  if (!box) return;
+  if (comboN >= 3) {
+    box.innerHTML = `<span class="combo-x">×${comboN}</span><span class="combo-lbl">COMBO</span>`;
+    box.classList.add("show");
+    box.classList.remove("bump");
+    void box.offsetWidth; // relance l'animation de pulsation
+    box.classList.add("bump");
+  }
+  clearTimeout(comboTimer);
+  comboTimer = setTimeout(() => {
+    box.classList.remove("show");
+    comboN = 0;
+  }, COMBO_WINDOW);
+}
+
 function startEngine(level, type) {
   if (engine) engine.dispose();
   gameType = getGame(type || gameType).id;
@@ -150,7 +246,7 @@ function renderCenter(st) {
             : "Nouvelle manche imminente…"
           : "Nouvelle course imminente…";
       const cap = gameType === "team-war" ? (st.winner.draw ? "🤝 Match nul" : "🏆 Camp vainqueur") : "🏆 Vainqueur";
-      html = `<div class="win sh"><span class="cap">${cap}</span><span style="color:${st.winner.color}">${esc(wname)}</span><small>${sub}</small></div>`;
+      html = `<div class="win sh"><span class="cap">${cap}</span><span class="wname" style="color:${st.winner.color}">${esc(wname)}</span><small>${sub}</small></div>`;
     } else {
       key = "win-none";
       html = "";
@@ -168,12 +264,24 @@ function setDemo(on) {
   demoT = null;
   if (on) {
     let i = 0;
-    const GIFTS = ["Rose", "Rose", "GG", "Finger Heart", "Lion", "TikTok"];
+    const GIFTS = [
+      { name: "Rose", diamonds: 1 },
+      { name: "Rose", diamonds: 1 },
+      { name: "GG", diamonds: 1 },
+      { name: "Finger Heart", diamonds: 5 },
+      { name: "TikTok", diamonds: 1 },
+      { name: "Lion", diamonds: 29 },
+      { name: "Galaxy", diamonds: 1000 },
+    ];
     demoT = setInterval(() => {
       if (!engine) return;
       const idx = Math.floor(Math.random() * DEMO.length);
-      const gn = GIFTS[Math.floor(Math.random() * GIFTS.length)];
-      engine.handleEvent({ type: "gift", userId: "demo_" + idx, nickname: DEMO[idx], avatar: "", giftName: gn, diamonds: 5, count: 1 + (i++ % 2) });
+      const g = GIFTS[Math.floor(Math.random() * GIFTS.length)];
+      const count = g.diamonds >= 500 ? 1 : 1 + Math.floor(Math.random() * 4);
+      const ev = { type: "gift", userId: "demo_" + idx, nickname: DEMO[idx], avatar: "", giftName: g.name, diamonds: g.diamonds, count };
+      engine.handleEvent(ev);
+      showGiftAlert(ev);
+      i++;
     }, 700);
   }
 }
@@ -182,6 +290,7 @@ bridge?.onControl((msg) => {
   if (!msg) return;
   if (msg.type === "event") {
     engine?.handleEvent(msg.event);
+    if (msg.event?.type === "gift") showGiftAlert(msg.event);
     if (msg.event?.type === "connected") setDemo(false);
   } else if (msg.type === "cmd") {
     const c = msg.cmd;
